@@ -8,6 +8,7 @@ Usage (from repo root):
         --camera_type scannet
 """
 
+import json
 import os
 import sys
 import copy
@@ -71,16 +72,35 @@ from util import Voxelize, pairwise_indices, num_to_natural, remove_small_group,
 
 # ── Camera helpers ───────────────────────────────────────────────────────────
 
-def _k_inv(camera_type: str):
-    cam = CAMERA_CONFIGS[camera_type]
-    intr = cam["intrinsics"]
-    fx, fy, ppx, ppy = intr["fx"], intr["fy"], intr["ppx"], intr["ppy"]
+def _load_scene_intrinsics(base_dir: str) -> dict | None:
+    """Load per-scene intrinsics written by unpack_images / prepare_scene."""
+    p = Path(base_dir) / "intrinsics.json"
+    if not p.exists():
+        return None
+    with open(p) as f:
+        return json.load(f)
+
+
+def _k_inv(camera_type: str, intr_override: dict | None = None):
+    """Return (K_inv 3×3, cam_to_imu 4×4).
+
+    intr_override: dict with keys fx, fy, cx, cy (from per-scene intrinsics.json).
+    When provided, cam_to_imu is identity (ScanNet poses are already camera-to-world).
+    """
+    if intr_override is not None:
+        fx, fy   = intr_override["fx"],  intr_override["fy"]
+        ppx, ppy = intr_override["cx"],  intr_override["cy"]
+        cam_to_imu = np.eye(4, dtype=np.float64)
+    else:
+        cam = CAMERA_CONFIGS[camera_type]
+        intr = cam["intrinsics"]
+        fx, fy, ppx, ppy = intr["fx"], intr["fy"], intr["ppx"], intr["ppy"]
+        cam_to_imu = np.array(cam["cam_to_imu"])
     K_inv = np.array([
         [1/fx,    0, -ppx/fx],
         [   0, 1/fy, -ppy/fy],
         [   0,    0,       1],
     ])
-    cam_to_imu = np.array(cam["cam_to_imu"])
     return K_inv, cam_to_imu
 
 
@@ -290,8 +310,12 @@ def cal_2_scenes(pcd_list, index, voxel_size, voxelize, th=50):
     return voxelize(merged)
 
 
-def seg_pcd(frame_paths, save_path, mask_generator, voxel_size, voxelizer, th, point_stride, camera_type):
-    K_inv, cam_to_imu = _k_inv(camera_type)
+def seg_pcd(frame_paths, save_path, mask_generator, voxel_size, voxelizer, th, point_stride, camera_type, base_dir=None):
+    intr_override = _load_scene_intrinsics(base_dir) if base_dir is not None else None
+    K_inv, cam_to_imu = _k_inv(camera_type, intr_override)
+    if intr_override is not None:
+        print(f"Using per-scene intrinsics: fx={intr_override['fx']:.2f} fy={intr_override['fy']:.2f} "
+              f"cx={intr_override['cx']:.1f} cy={intr_override['cy']:.1f}")
 
     pcd_list = []
     for fp in tqdm(frame_paths, desc="SAM3D: processing frames"):
@@ -359,7 +383,8 @@ def main():
 
     voxelize = Voxelize(voxel_size=args.voxel_size, mode="train", keys=("coord", "color", "group"))
     seg_pcd(frame_paths, args.save_path, mask_gen, args.voxel_size,
-            voxelize, args.th, args.point_stride, args.camera_type)
+            voxelize, args.th, args.point_stride, args.camera_type,
+            base_dir=args.base_dir)
 
 
 if __name__ == "__main__":

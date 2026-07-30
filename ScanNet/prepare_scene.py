@@ -1,7 +1,7 @@
 """
-End-to-end ScanNet scene preparation for the SPARC pipeline.
+End-to-end ScanNet scene preparation for the the pipeline pipeline.
 
-Extracts a ScanNet .sens file into per-frame folders that SPARC expects,
+Extracts a ScanNet .sens file into per-frame folders that the pipeline expects,
 then optionally runs the full pipeline.
 
 Usage:
@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sys
 import subprocess
@@ -26,11 +27,6 @@ import skimage.transform as sktf
 sys.path.insert(0, str(Path(__file__).parent))
 from scannet_sensordata import SensorData
 
-# ScanNet intrinsics (640x480 colour, 640x480 depth)
-SCANNET_FX = 577.870605
-SCANNET_FY = 577.870605
-SCANNET_CX = 319.5
-SCANNET_CY = 239.5
 OUTPUT_HEIGHT = 480
 OUTPUT_WIDTH = 640
 
@@ -80,12 +76,27 @@ def extract_scene(sens_path: str, out_dir: str, frame_skip: int = 1) -> int:
 
         written += 1
 
+    # Per-scene intrinsics from the .sens depth camera (vary across ScanNet scenes)
+    intr = sd.intrinsic_depth
+    intrinsics_data = {
+        "fx": float(intr[0, 0]),
+        "fy": float(intr[1, 1]),
+        "cx": float(intr[0, 2]),
+        "cy": float(intr[1, 2]),
+        "width": int(sd.depth_width),
+        "height": int(sd.depth_height),
+        "camera_type": "scannet",
+    }
+    with open(out_path / "intrinsics.json", "w") as f:
+        json.dump(intrinsics_data, f, indent=2)
+    print(f"  Saved intrinsics: fx={intr[0,0]:.2f} fy={intr[1,1]:.2f} cx={intr[0,2]:.1f} cy={intr[1,2]:.1f}")
+
     print(f"Wrote {written} frames to {out_dir}")
     return written
 
 
 def run_pipeline(out_dir: str, scene_name: str, force: bool = False) -> None:
-    """Run the SPARC pipeline on an already-extracted scene directory."""
+    """Run the the pipeline pipeline on an already-extracted scene directory."""
     src_dir = Path(__file__).parent.parent / "src"
     cmd = (
         f"cd {src_dir} && python pipeline.py "
@@ -99,14 +110,14 @@ def run_pipeline(out_dir: str, scene_name: str, force: bool = False) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Prepare a ScanNet scene for SPARC")
+    parser = argparse.ArgumentParser(description="Prepare a ScanNet scene for the pipeline")
     parser.add_argument("--sens", required=True, help="Path to .sens file")
     parser.add_argument("--out_dir", required=True,
                         help="Output directory for extracted frames")
     parser.add_argument("--frame_skip", type=int, default=1,
                         help="Export every Nth frame (default: 1)")
     parser.add_argument("--run_pipeline", action="store_true",
-                        help="Run the SPARC pipeline after extraction")
+                        help="Run the the pipeline pipeline after extraction")
     parser.add_argument("--scene_name", type=str, default="",
                         help="Scene name for the pipeline (required if --run_pipeline)")
     parser.add_argument("--force", action="store_true",

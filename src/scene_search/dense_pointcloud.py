@@ -9,6 +9,7 @@ Usage (from repo root):
 """
 
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -24,8 +25,23 @@ _cfg = _config.load()
 _min_depth = _cfg.get("min_depth", 0.5)
 _max_depth = _cfg.get("max_depth", 6.0)
 
+# Pose files accepted for ScanNet (camera-to-world, identity cam_to_imu)
+_SCANNET_POSE_PATTERNS = ["pose.npy", "pose.txt", "extrinsic_matrix.npy"]
+
+
+def load_scene_intrinsics(base_dir: str) -> dict | None:
+    """Return per-scene intrinsics saved by unpack_images / prepare_scene, or None."""
+    p = Path(base_dir) / "intrinsics.json"
+    if not p.exists():
+        return None
+    with open(p) as f:
+        return json.load(f)
+
 
 def detect_camera_type(base_dir: str) -> str:
+    # Presence of intrinsics.json means the scene was extracted from ScanNet
+    if (Path(base_dir) / "intrinsics.json").exists():
+        return "scannet"
     dirs = sorted(
         d for d in (Path(base_dir) / e for e in os.listdir(base_dir))
         if d.is_dir()
@@ -33,10 +49,10 @@ def detect_camera_type(base_dir: str) -> str:
     if not dirs:
         return "realsense"
     first = dirs[0]
-    if (first / "extrinsic_matrix.npy").exists():
-        return "realsense"
     if (first / "pose.npy").exists() or (first / "pose.txt").exists():
         return "scannet"
+    if (first / "extrinsic_matrix.npy").exists():
+        return "realsense"
     return "realsense"
 
 
@@ -61,16 +77,23 @@ def create_dense_pointcloud(
     max_depth: float = _max_depth,
     camera_type: str | None = None,
 ):
-    if camera_type is None:
-        camera_type = detect_camera_type(base_dir)
-
-    intrinsics, cam_to_imu = get_camera_config(camera_type)
-    pose_patterns = get_pose_file_patterns(camera_type)
-
-    fx   = intrinsics["fx"]
-    fy   = intrinsics["fy"]
-    ppx  = intrinsics["ppx"]
-    ppy  = intrinsics["ppy"]
+    # Per-scene intrinsics take priority (set by unpack_images / prepare_scene)
+    scene_intr = load_scene_intrinsics(base_dir)
+    if scene_intr is not None:
+        camera_type = "scannet"
+        fx, fy     = scene_intr["fx"],  scene_intr["fy"]
+        ppx, ppy   = scene_intr["cx"],  scene_intr["cy"]
+        cam_to_imu = np.eye(4, dtype=np.float64)
+        pose_patterns = _SCANNET_POSE_PATTERNS
+    else:
+        if camera_type is None:
+            camera_type = detect_camera_type(base_dir)
+        intrinsics, cam_to_imu = get_camera_config(camera_type)
+        pose_patterns = get_pose_file_patterns(camera_type)
+        if camera_type == "scannet":
+            pose_patterns = _SCANNET_POSE_PATTERNS
+        fx, fy   = intrinsics["fx"],  intrinsics["fy"]
+        ppx, ppy = intrinsics["ppx"], intrinsics["ppy"]
 
     print(f"Camera: {camera_type}  fx={fx:.1f} fy={fy:.1f} cx={ppx:.1f} cy={ppy:.1f}")
 

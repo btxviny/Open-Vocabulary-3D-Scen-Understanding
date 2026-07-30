@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import sys
 import numpy as np
@@ -57,6 +58,20 @@ def main():
 
             # Pose saved as pose.npy so pipeline auto-detects camera_type=scannet
             np.save(os.path.join(frame_folder, 'pose.npy'), frame.camera_to_world)
+
+        # Per-scene intrinsics from the .sens depth camera
+        intr = sd.intrinsic_depth
+        intrinsics_data = {
+            "fx": float(intr[0, 0]),
+            "fy": float(intr[1, 1]),
+            "cx": float(intr[0, 2]),
+            "cy": float(intr[1, 2]),
+            "width": int(sd.depth_width),
+            "height": int(sd.depth_height),
+            "camera_type": "scannet",
+        }
+        with open(os.path.join(output_scene_path, "intrinsics.json"), "w") as f:
+            json.dump(intrinsics_data, f, indent=2)
 
         print(f"Finished exporting {len(sd.frames)//opt.frame_skip} frames for {scene}.")
 
