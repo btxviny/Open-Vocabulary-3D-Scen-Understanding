@@ -1,0 +1,54 @@
+[project]
+name = "open-3d-scene-understanding"
+version = "0.1.0"
+description = "Open-vocabulary 3D scene understanding with CLIP, SAM2, and ScanNet"
+requires-python = ">=3.10"
+dependencies = [
+    # Core ML
+    "torch>=2.7.0",
+    "torchvision>=0.22.0",
+    # Vision models
+    "clip @ git+https://github.com/openai/CLIP.git",
+    "sam2 @ git+https://github.com/facebookresearch/sam2.git",
+    # Point cloud / 3D
+    "open3d>=0.19.0",
+    # Vision / image
+    "opencv-python>=4.10.0",
+    "Pillow>=10.0.0",
+    "scikit-image>=0.22.0",
+    "imageio>=2.33.0",
+    # ML utilities
+    "scikit-learn>=1.4.0",
+    "scipy>=1.13.0",
+    "numpy>=1.26.0,<2.0",
+    # UI / visualisation
+    "streamlit>=1.44.0",
+    "rerun-sdk>=0.22.0",
+    "matplotlib>=3.9.0",
+    # Vector store
+    "chromadb>=1.0.0",
+    # Utilities
+    "tqdm>=4.66.0",
+    "pyyaml>=6.0",
+    # ScanNet preprocessing extras
+    "imageio-ffmpeg>=0.4.9",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv]
+python-preference = "only-managed"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]

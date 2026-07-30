@@ -1,181 +1,159 @@
 """
-Example Usage:
-python pipeline.py --run_path /path/to/data --scene_name "Living Room" --emoji "🏠" --camera_type auto
+End-to-end scene processing pipeline.
+
+Usage (from repo root):
+    uv run python -m src.pipeline \
+        --run_path /path/to/scene_frames \
+        --scene_name "Living Room" \
+        --camera_type scannet
 """
-import subprocess
+
 import argparse
+import subprocess
 import yaml
 from pathlib import Path
 from time import time
 
-def run_step(msg, cmd):
+# scenes_config.yaml lives at repo root (one level above src/)
+_REPO_ROOT = Path(__file__).parent.parent
+_SCENES_CONFIG = _REPO_ROOT / "scenes_config.yaml"
+
+
+def run_step(msg: str, cmd: str) -> bool:
     print(f"\n{msg}")
-    try:    
-        start_time = time()
-        subprocess.run(cmd, shell=True, check=True)
-        print(f"✅ Done in {time() - start_time:.2f} seconds")
+    t0 = time()
+    try:
+        subprocess.run(cmd, shell=True, check=True, cwd=Path(__file__).parent)
+        print(f"Done in {time() - t0:.1f}s")
+        return True
     except subprocess.CalledProcessError as e:
-        print(f"❌ Failed: {e}")
+        print(f"Failed: {e}")
         return False
-    return True
 
 
-def update_scene_config(scene_name: str, run_path: str):
-    """Update scenes_config.yaml with the new scene."""
-    config_path = Path("../scenes_config.yaml")
-    
-    # Load existing config or create new
-    if config_path.exists():
-        with open(config_path) as f:
-            config = yaml.safe_load(f) or {"scenes": {}}
-    else:
-        config = {"scenes": {}}
-    
-    # Define collection names and scene directory
-    points_collection = f"{scene_name}_points"
-    clusters_collection = f"{scene_name}_clusters"
-    scene_dir = Path(run_path) / scene_name
-    
-    # Add or update scene configuration
-    config["scenes"][scene_name] = {
-        "points": {
-            "npz_file": str(scene_dir / "dense_pointcloud.npz"),
-            "chromadb_path": str(scene_dir / "vector_store"),
-            "collection": points_collection
-        },
-        "clusters": {
-            "npz_file": str(scene_dir / "dense_pointcloud.npz"),
-            "chromadb_path": str(scene_dir / "vector_store"),
-            "collection": clusters_collection
-        }
-    }
-    
-    # Save updated config
-    with open(config_path, "w") as f:
+def detect_camera_type(run_path: str) -> str:
+    dirs = [x for x in Path(run_path).iterdir() if x.is_dir()]
+    if not dirs:
+        return "realsense"
+    first = sorted(dirs)[0]
+    if (first / "extrinsic_matrix.npy").exists():
+        return "realsense"
+    if (first / "pose.npy").exists() or (first / "pose.txt").exists():
+        return "scannet"
+    return "realsense"
+
+
+def load_scenes_config() -> dict:
+    if _SCENES_CONFIG.exists():
+        with open(_SCENES_CONFIG) as f:
+            return yaml.safe_load(f) or {"scenes": {}}
+    return {"scenes": {}}
+
+
+def save_scenes_config(config: dict) -> None:
+    with open(_SCENES_CONFIG, "w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
 
-def detect_camera_type(run_path: str):
-    """
-    Detect camera type based on data structure.
-    Returns 'realsense' or 'scannet'.
-    """
-    # Look for characteristic files
-    frames_dir = [x for x in Path(run_path).iterdir() if x.is_dir()]
-    
-    if not frames_dir:
-        return 'realsense'  # default
-    
-    first_frame = frames_dir[0]
-    
-    # Check for RealSense format (extrinsic_matrix.npy)
-    if (first_frame / 'extrinsic_matrix.npy').exists():
-        return 'realsense'
-    # Check for ScanNet format (pose.txt or pose.npy)
-    elif any((first_frame / f).exists() for f in ['pose.txt', 'pose.npy']):
-        return 'scannet'
-    
-    return 'realsense'  # default
+def main(run_path: str, scene_name: str, camera_type: str | None = None,
+         interactive: bool = False, force: bool = False) -> None:
+    t0 = time()
 
+    config = load_scenes_config()
+    if scene_name in config.get("scenes", {}):
+        if force:
+            print(f"Overwriting existing scene: {scene_name}")
+        else:
+            ans = input(f"Scene '{scene_name}' already exists. Overwrite? (y/N): ")
+            if ans.lower() != "y":
+                print("Cancelled.")
+                return
 
-def main(run_path: str, scene_name: str, camera_type: str = None, force: bool = False):
-    # Check if scene already exists in config
-    start_time = time()
-    config_path = Path("../scenes_config.yaml")
-    print(f"📋 Using default config: {config_path}")
-    if config_path.exists():
-        with open(config_path) as f:
-            config = yaml.safe_load(f) or {"scenes": {}}
-            if scene_name in config["scenes"]:
-                if force:
-                    print(f"🔄 Force overwriting existing scene: {scene_name}")
-                else:
-                    response = input(f"Scene '{scene_name}' already exists. Do you want to overwrite it? (y/N): ")
-                    if response.lower() != 'y':
-                        print("Operation cancelled.")
-                        return
-
-    # Create scene directory
     scene_dir = Path(run_path) / scene_name
     scene_dir.mkdir(exist_ok=True)
-    print(f"\n📁 Created scene directory: {scene_dir}")
+    print(f"Scene directory: {scene_dir}")
 
-    # Auto-detect camera type if not specified
-    if camera_type == 'auto' or camera_type is None:
+    if camera_type is None or camera_type == "auto":
         camera_type = detect_camera_type(run_path)
-        print(f"🔍 Auto-detected camera type: {camera_type}")
+        print(f"Auto-detected camera type: {camera_type}")
 
-    # Common steps run regardless of method
     steps = {
-        "0: Segmenting and clustering with SAM3D:": f'python -m scene_search.sam3d --base_dir {run_path} --save_path {scene_dir}/segmented_pointcloud.npz --camera_type {camera_type}',
-        "1: Creating CLIP pointcloud": f'python -m scene_search.clip --base_dir {run_path} --save_path {scene_dir}/clip_pointcloud.npz --logic patch',
-        "2: Creating dense pointcloud": f'python -m scene_search.dense_pointcloud --base_dir {run_path} --save_path {scene_dir}/dense_pointcloud.npz --camera_type {camera_type}',
-        "3: Interpolating embeddings and cluster IDs": f'python -m scene_search.interpolate --dense_pc_path {scene_dir}/dense_pointcloud.npz --sparse_pc_path {scene_dir}/clip_pointcloud.npz  --segmented_pc_path {scene_dir}/segmented_pointcloud.npz',
-        "4: Creating vectorstore for dense clip pointcloud": f'python -m scene_search.vectorstore --npz_file {scene_dir}/dense_pointcloud.npz --logic points --collection_name {scene_name}_points',
+        "Step 0 – SAM3D segmentation": (
+            f"python -m scene_search.sam3d"
+            f" --base_dir {run_path}"
+            f" --save_path {scene_dir}/segmented_pointcloud.npz"
+            f" --camera_type {camera_type}"
+        ),
+        "Step 1 – CLIP point cloud": (
+            f"python -m scene_search.clip"
+            f" --base_dir {run_path}"
+            f" --save_path {scene_dir}/clip_pointcloud.npz"
+            f" --logic patch"
+        ),
+        "Step 2 – Dense point cloud": (
+            f"python -m scene_search.dense_pointcloud"
+            f" --base_dir {run_path}"
+            f" --save_path {scene_dir}/dense_pointcloud.npz"
+            f" --camera_type {camera_type}"
+        ),
+        "Step 3 – Interpolate embeddings + cluster IDs": (
+            f"python -m scene_search.interpolate"
+            f" --dense_pc_path {scene_dir}/dense_pointcloud.npz"
+            f" --sparse_pc_path {scene_dir}/clip_pointcloud.npz"
+            f" --segmented_pc_path {scene_dir}/segmented_pointcloud.npz"
+        ),
+        "Step 4 – Vector store (points)": (
+            f"python -m scene_search.vectorstore"
+            f" --npz_file {scene_dir}/dense_pointcloud.npz"
+            f" --logic points"
+            f" --collection_name {scene_name}_points"
+        ),
     }
 
-    print(f"\n🟢 Running steps for scene: {scene_name} with {camera_type} camera")
     for msg, cmd in steps.items():
         if not run_step(msg, cmd):
             return
 
-    # Handle interactive segmentation based on flag
-    if args.interactive:
-        print("\n🟢 Running interactive segmentation...")
-        if not run_step("Interactive segmentation", 
-            f'python -m scene_search.interactive_segmentation --input {scene_dir}/dense_pointcloud.npz --output {scene_dir}/dense_pointcloud.npz'):
+    if interactive:
+        if not run_step(
+            "Step 5 – Interactive segmentation",
+            f"python -m scene_search.interactive_segmentation"
+            f" --input {scene_dir}/dense_pointcloud.npz"
+            f" --output {scene_dir}/dense_pointcloud.npz",
+        ):
             return
     else:
-        print("\n🟢 Using SAM3D segmentated objects...")
-        if not run_step("5: Creating vectorstore for clustered pointcloud",
-            f'python -m scene_search.vectorstore --npz_file {scene_dir}/dense_pointcloud.npz --logic clusters --collection_name {scene_name}_clusters'):
+        if not run_step(
+            "Step 5 – Vector store (clusters)",
+            f"python -m scene_search.vectorstore"
+            f" --npz_file {scene_dir}/dense_pointcloud.npz"
+            f" --logic clusters"
+            f" --collection_name {scene_name}_clusters",
+        ):
             return
 
-    # Update the configuration file with scene-specific paths
-    config = {"scenes": {}}
-    if config_path.exists():
-        with open(config_path) as f:
-            config = yaml.safe_load(f) or {"scenes": {}}
-
-    points_collection = f"{scene_name}_points"
-    clusters_collection = f"{scene_name}_clusters"
-    
-    config["scenes"][scene_name] = {
-        "points": {
-            "npz_file": str(scene_dir / "dense_pointcloud.npz"),
-            "chromadb_path": str(scene_dir / "vector_store"),
-            "collection": points_collection
-        },
-        "clusters": {
-            "npz_file": str(scene_dir / "dense_pointcloud.npz"),
-            "chromadb_path": str(scene_dir / "vector_store"),
-            "collection": clusters_collection
-        }
+    config = load_scenes_config()
+    config.setdefault("scenes", {})[scene_name] = {
+        "points":   {"npz_file": str(scene_dir / "dense_pointcloud.npz"),
+                     "chromadb_path": str(scene_dir / "vector_store"),
+                     "collection": f"{scene_name}_points"},
+        "clusters": {"npz_file": str(scene_dir / "dense_pointcloud.npz"),
+                     "chromadb_path": str(scene_dir / "vector_store"),
+                     "collection": f"{scene_name}_clusters"},
     }
-    
-    with open(config_path, "w") as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+    save_scenes_config(config)
 
-    print(f"\n🟢 Scene '{scene_name}' has been processed and added to scenes_config.yaml")
-    print(f"Camera type used: {camera_type}")
-    print(f"Time taken: {(time() - start_time) / 60:.2f} minutes")
-
-
+    print(f"\nScene '{scene_name}' added to {_SCENES_CONFIG}")
+    print(f"Camera: {camera_type} | Time: {(time() - t0) / 60:.1f} min")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="3D Scene Segmentation Pipeline")
-    parser.add_argument('--run_path', type=str, required=True, help="Path to data from a run")
-    parser.add_argument('--scene_name', type=str, required=True, help="Name of the scene (will be displayed in the UI)")
-    parser.add_argument('--emoji', type=str, default="", help="Optional emoji to append to the scene name")
-    parser.add_argument('--camera_type', type=str, choices=['auto', 'realsense', 'scannet'], default='auto',
-                       help="Camera type to use. 'auto' will attempt to detect automatically.")
-    parser.add_argument('--interactive', action='store_true',
-                       help="Enable interactive segmentation. If not specified, uses SAM3D segmented objects.")
-    parser.add_argument('--force', action='store_true',
-                       help="Force overwrite existing scenes without prompting")
+    parser = argparse.ArgumentParser(description="3D scene processing pipeline")
+    parser.add_argument("--run_path",    required=True, help="Directory of extracted frames")
+    parser.add_argument("--scene_name",  required=True, help="Scene label (shown in app)")
+    parser.add_argument("--camera_type", choices=["auto", "realsense", "scannet"], default="auto")
+    parser.add_argument("--interactive", action="store_true",
+                        help="Use interactive segmentation instead of SAM3D clusters")
+    parser.add_argument("--force", action="store_true", help="Overwrite without prompting")
     args = parser.parse_args()
-    
-    # Combine scene name and emoji if provided
-    display_name = f"{args.scene_name} {args.emoji}".strip()
-    main(args.run_path, display_name, args.camera_type, args.force)
+    main(args.run_path, args.scene_name, args.camera_type, args.interactive, args.force)

@@ -16,6 +16,7 @@ venv/
 ### Model weights ###
 *.pth
 *.pt
+checkpoints/
 
 ### Data & point clouds ###
 *.pcd

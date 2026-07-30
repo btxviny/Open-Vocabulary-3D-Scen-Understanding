@@ -10,15 +10,13 @@ import numpy as np
 import argparse
 from PIL import Image
 from sklearn.neighbors import KDTree
-import yaml
+from . import _config as _cfg_mod
 
-# Config
-with open('./config.yaml', 'r') as f:
-    config = yaml.safe_load(f)
-frame_stride = config['frame_stride']
-downsample_rate = config['downsample_rate']
-weights = config.get('weights',"ViT-B/16")
-logic = config['logic']
+_cfg = _cfg_mod.load()
+frame_stride    = _cfg['frame_stride']
+downsample_rate = _cfg['downsample_rate']
+weights         = _cfg.get('weights', 'ViT-B/32')
+logic           = _cfg['logic']
 BATCH_SIZE = 8
 
 # --- Utility Functions --- #

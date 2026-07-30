@@ -7,14 +7,13 @@ import numpy as np
 from sklearn.neighbors import NearestNeighbors
 from tqdm import tqdm
 import argparse
-import yaml
 from scipy import stats
 
+from . import _config as _cfg_mod
 
-with open('config.yaml', 'r') as f:
-    config = yaml.safe_load(f)
-interpolation_k = config['interpolation_k']
-print(f"Num of neighbors for interpolation: {interpolation_k}")
+_cfg = _cfg_mod.load()
+interpolation_k = _cfg['interpolation_k']
+print(f"Interpolation neighbours: {interpolation_k}")
 
 
 def interpolate_embeddings(dense_points, sparse_points, sparse_embeddings, k=21, batch_size=5012, sigma=0.01):
