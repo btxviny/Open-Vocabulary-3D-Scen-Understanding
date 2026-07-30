@@ -1,11 +1,14 @@
 """
 Build a dense RGB point cloud by unprojecting all depth frames.
 
+Intrinsics are loaded from intrinsics.json in the scene directory (written by
+prepare_scene.py / unpack_images.py).  If not found, falls back to the
+default_intrinsics section of src/config.yaml.
+
 Usage (from repo root):
     uv run python -m scene_search.dense_pointcloud \
         --base_dir /path/to/scene_frames \
-        --save_path output/dense_pointcloud.npz \
-        --camera_type scannet
+        --save_path output/dense_pointcloud.npz
 """
 
 import argparse
@@ -19,18 +22,24 @@ from PIL import Image
 from tqdm import tqdm
 
 from . import _config
-from .camera_configs import get_camera_config, list_available_cameras, get_pose_file_patterns
 
-_cfg = _config.load()
+_cfg      = _config.load()
 _min_depth = _cfg.get("min_depth", 0.5)
 _max_depth = _cfg.get("max_depth", 6.0)
 
-# Pose files accepted for ScanNet (camera-to-world, identity cam_to_imu)
-_SCANNET_POSE_PATTERNS = ["pose.npy", "pose.txt", "extrinsic_matrix.npy"]
+# All pose filename conventions we accept (ScanNet + legacy)
+_POSE_PATTERNS = ["pose.npy", "pose.txt", "extrinsic_matrix.npy"]
+
+# Fallback intrinsics when no intrinsics.json is present
+_fallback_intr = _cfg.get("default_intrinsics", {})
+_FALLBACK_FX  = _fallback_intr.get("fx",  577.87)
+_FALLBACK_FY  = _fallback_intr.get("fy",  577.87)
+_FALLBACK_PPX = _fallback_intr.get("cx",  319.5)
+_FALLBACK_PPY = _fallback_intr.get("cy",  239.5)
 
 
 def load_scene_intrinsics(base_dir: str) -> dict | None:
-    """Return per-scene intrinsics saved by unpack_images / prepare_scene, or None."""
+    """Return per-scene intrinsics from intrinsics.json, or None."""
     p = Path(base_dir) / "intrinsics.json"
     if not p.exists():
         return None
@@ -38,26 +47,8 @@ def load_scene_intrinsics(base_dir: str) -> dict | None:
         return json.load(f)
 
 
-def detect_camera_type(base_dir: str) -> str:
-    # Presence of intrinsics.json means the scene was extracted from ScanNet
-    if (Path(base_dir) / "intrinsics.json").exists():
-        return "scannet"
-    dirs = sorted(
-        d for d in (Path(base_dir) / e for e in os.listdir(base_dir))
-        if d.is_dir()
-    )
-    if not dirs:
-        return "realsense"
-    first = dirs[0]
-    if (first / "pose.npy").exists() or (first / "pose.txt").exists():
-        return "scannet"
-    if (first / "extrinsic_matrix.npy").exists():
-        return "realsense"
-    return "realsense"
-
-
-def _load_pose(frame_dir: str, pose_patterns) -> np.ndarray | None:
-    for pat in pose_patterns:
+def _load_pose(frame_dir: str) -> np.ndarray | None:
+    for pat in _POSE_PATTERNS:
         p = os.path.join(frame_dir, pat)
         if not os.path.exists(p):
             continue
@@ -75,27 +66,16 @@ def create_dense_pointcloud(
     stride: int = 10,
     min_depth: float = _min_depth,
     max_depth: float = _max_depth,
-    camera_type: str | None = None,
 ):
-    # Per-scene intrinsics take priority (set by unpack_images / prepare_scene)
     scene_intr = load_scene_intrinsics(base_dir)
     if scene_intr is not None:
-        camera_type = "scannet"
-        fx, fy     = scene_intr["fx"],  scene_intr["fy"]
-        ppx, ppy   = scene_intr["cx"],  scene_intr["cy"]
-        cam_to_imu = np.eye(4, dtype=np.float64)
-        pose_patterns = _SCANNET_POSE_PATTERNS
+        fx, fy   = scene_intr["fx"], scene_intr["fy"]
+        ppx, ppy = scene_intr["cx"], scene_intr["cy"]
     else:
-        if camera_type is None:
-            camera_type = detect_camera_type(base_dir)
-        intrinsics, cam_to_imu = get_camera_config(camera_type)
-        pose_patterns = get_pose_file_patterns(camera_type)
-        if camera_type == "scannet":
-            pose_patterns = _SCANNET_POSE_PATTERNS
-        fx, fy   = intrinsics["fx"],  intrinsics["fy"]
-        ppx, ppy = intrinsics["ppx"], intrinsics["ppy"]
+        fx, fy, ppx, ppy = _FALLBACK_FX, _FALLBACK_FY, _FALLBACK_PPX, _FALLBACK_PPY
+        print("Warning: no intrinsics.json found — using fallback intrinsics")
 
-    print(f"Camera: {camera_type}  fx={fx:.1f} fy={fy:.1f} cx={ppx:.1f} cy={ppy:.1f}")
+    print(f"Intrinsics: fx={fx:.1f} fy={fy:.1f} cx={ppx:.1f} cy={ppy:.1f}")
 
     frame_dirs = sorted(
         os.path.join(base_dir, d)
@@ -112,20 +92,15 @@ def create_dense_pointcloud(
         if not os.path.exists(rgb_path) or not os.path.exists(dep_path):
             continue
 
-        extrinsic = _load_pose(frame_dir, pose_patterns)
-        if extrinsic is None:
+        pose = _load_pose(frame_dir)
+        if pose is None:
             continue
 
         depth = np.array(Image.open(dep_path), dtype=np.float32) / 1000.0  # mm → m
         color = np.array(Image.open(rgb_path).convert("RGB"), dtype=np.float32) / 255.0
 
-        # Subsample and filter
         H, W = depth.shape
-        ys, xs = np.meshgrid(
-            np.arange(0, H, stride),
-            np.arange(0, W, stride),
-            indexing="ij",
-        )
+        ys, xs = np.meshgrid(np.arange(0, H, stride), np.arange(0, W, stride), indexing="ij")
         ys, xs = ys.flatten(), xs.flatten()
         zs = depth[ys, xs]
 
@@ -134,13 +109,10 @@ def create_dense_pointcloud(
         if len(zs) == 0:
             continue
 
-        # Vectorised unproject (camera coords)
         x_cam = (xs - ppx) / fx * zs
         y_cam = (ys - ppy) / fy * zs
         pts_cam = np.stack([x_cam, y_cam, zs, np.ones_like(zs)], axis=1)  # (N, 4)
-
-        # Camera → world
-        pts_world = (extrinsic @ cam_to_imu @ pts_cam.T).T[:, :3]
+        pts_world = (pose @ pts_cam.T).T[:, :3]
 
         fin = np.isfinite(pts_world).all(axis=1)
         all_points.append(pts_world[fin].astype(np.float32))
@@ -149,33 +121,25 @@ def create_dense_pointcloud(
     if not all_points:
         raise ValueError("No valid points found in the scene")
 
-    pts = np.concatenate(all_points)
+    pts  = np.concatenate(all_points)
     cols = np.concatenate(all_colors)
 
-    # Downsample with Open3D
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
     pcd.colors = o3d.utility.Vector3dVector(cols)
     pcd = pcd.uniform_down_sample(every_k_points=10)
 
-    pts  = np.asarray(pcd.points,  dtype=np.float32)
-    cols = np.asarray(pcd.colors,  dtype=np.float32)
+    pts  = np.asarray(pcd.points, dtype=np.float32)
+    cols = np.asarray(pcd.colors, dtype=np.float32)
+    mask = np.isfinite(pts).all(axis=1)
 
-    valid_mask = np.isfinite(pts).all(axis=1)
-    pts, cols = pts[valid_mask], cols[valid_mask]
-
-    np.savez(save_path, points=pts, colors=cols)
-    print(f"Saved {save_path} ({len(pts)} points)")
+    np.savez(save_path, points=pts[mask], colors=cols[mask])
+    print(f"Saved {save_path} ({mask.sum()} points)")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base_dir",    required=True)
-    parser.add_argument("--save_path",   required=True)
-    parser.add_argument("--camera_type", choices=["auto"] + list_available_cameras(), default="auto")
+    parser.add_argument("--base_dir",  required=True)
+    parser.add_argument("--save_path", required=True)
     args = parser.parse_args()
-
-    create_dense_pointcloud(
-        args.base_dir, args.save_path,
-        camera_type=None if args.camera_type == "auto" else args.camera_type,
-    )
+    create_dense_pointcloud(args.base_dir, args.save_path)

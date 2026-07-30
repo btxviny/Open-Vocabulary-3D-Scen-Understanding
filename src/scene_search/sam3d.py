@@ -43,19 +43,18 @@ _sam_cfg = {
     "min_mask_region_area":   _cfg.get("sam3d", {}).get("min_mask_region_area", 200),
 }
 
-CAMERA_CONFIGS = _cfg.get("cameras", {})
-
 # ── SAM2 import (installed as a package) ────────────────────────────────────
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 from sam2.build_sam import build_sam2
 
 # ── SegmentAnything3D util (requires pointops to be built) ──────────────────
 def _find_sa3d():
-    """Find SegmentAnything3D directory: env var → sibling of repo root."""
+    """Find SegmentAnything3D directory: env var → inside repo root."""
     env = os.environ.get("SEGMENT_ANYTHING_3D_PATH")
     if env:
         return Path(env)
-    repo_root = Path(__file__).parents[3]
+    # parents[2] = src/ → open-3d-scene-understanding/ (repo root)
+    repo_root = Path(__file__).parents[2]
     return repo_root / "SegmentAnything3D"
 
 _sa3d = _find_sa3d()
@@ -72,8 +71,15 @@ from util import Voxelize, pairwise_indices, num_to_natural, remove_small_group,
 
 # ── Camera helpers ───────────────────────────────────────────────────────────
 
+_default_intr = _cfg.get("default_intrinsics", {})
+_FALLBACK_FX  = _default_intr.get("fx",  577.87)
+_FALLBACK_FY  = _default_intr.get("fy",  577.87)
+_FALLBACK_PPX = _default_intr.get("cx",  319.5)
+_FALLBACK_PPY = _default_intr.get("cy",  239.5)
+
+
 def _load_scene_intrinsics(base_dir: str) -> dict | None:
-    """Load per-scene intrinsics written by unpack_images / prepare_scene."""
+    """Load per-scene intrinsics from intrinsics.json (written by prepare_scene)."""
     p = Path(base_dir) / "intrinsics.json"
     if not p.exists():
         return None
@@ -81,35 +87,27 @@ def _load_scene_intrinsics(base_dir: str) -> dict | None:
         return json.load(f)
 
 
-def _k_inv(camera_type: str, intr_override: dict | None = None):
-    """Return (K_inv 3×3, cam_to_imu 4×4).
-
-    intr_override: dict with keys fx, fy, cx, cy (from per-scene intrinsics.json).
-    When provided, cam_to_imu is identity (ScanNet poses are already camera-to-world).
-    """
-    if intr_override is not None:
-        fx, fy   = intr_override["fx"],  intr_override["fy"]
-        ppx, ppy = intr_override["cx"],  intr_override["cy"]
-        cam_to_imu = np.eye(4, dtype=np.float64)
+def _k_inv(base_dir: str) -> tuple[np.ndarray, np.ndarray]:
+    """Return (K_inv 3×3, identity 4×4).  Intrinsics from intrinsics.json or fallback."""
+    intr = _load_scene_intrinsics(base_dir)
+    if intr is not None:
+        fx, fy   = intr["fx"],  intr["fy"]
+        ppx, ppy = intr["cx"],  intr["cy"]
+        print(f"Intrinsics: fx={fx:.2f} fy={fy:.2f} cx={ppx:.1f} cy={ppy:.1f}")
     else:
-        cam = CAMERA_CONFIGS[camera_type]
-        intr = cam["intrinsics"]
-        fx, fy, ppx, ppy = intr["fx"], intr["fy"], intr["ppx"], intr["ppy"]
-        cam_to_imu = np.array(cam["cam_to_imu"])
+        fx, fy, ppx, ppy = _FALLBACK_FX, _FALLBACK_FY, _FALLBACK_PPX, _FALLBACK_PPY
+        print("Warning: no intrinsics.json found — using fallback intrinsics")
     K_inv = np.array([
         [1/fx,    0, -ppx/fx],
         [   0, 1/fy, -ppy/fy],
         [   0,    0,       1],
     ])
-    return K_inv, cam_to_imu
+    return K_inv, np.eye(4, dtype=np.float64)
 
 
-def _load_pose(frame_path: str, camera_type: str):
-    """Load camera-to-world pose matrix; returns None if unavailable/invalid."""
-    candidates = (
-        ["extrinsic_matrix.npy"] if camera_type == "realsense"
-        else ["pose.npy", "pose.txt", "extrinsic_matrix.npy"]
-    )
+def _load_pose(frame_path: str):
+    """Load camera-to-world pose; tries pose.npy / pose.txt / extrinsic_matrix.npy."""
+    candidates = ["pose.npy", "pose.txt", "extrinsic_matrix.npy"]
     for fname in candidates:
         p = join(frame_path, fname)
         if not os.path.exists(p):
@@ -130,8 +128,8 @@ def _load_pose(frame_path: str, camera_type: str):
 
 # ── Per-frame processing ─────────────────────────────────────────────────────
 
-def get_pcd(frame_path, mask_generator, point_stride, K_inv, cam_to_imu, camera_type):
-    extrinsic = _load_pose(frame_path, camera_type)
+def get_pcd(frame_path, mask_generator, point_stride, K_inv, cam_to_imu):
+    extrinsic = _load_pose(frame_path)
     if extrinsic is None:
         return dict(coord=np.empty((0, 3)), color=np.empty((0, 3)), group=np.array([]))
 
@@ -310,16 +308,12 @@ def cal_2_scenes(pcd_list, index, voxel_size, voxelize, th=50):
     return voxelize(merged)
 
 
-def seg_pcd(frame_paths, save_path, mask_generator, voxel_size, voxelizer, th, point_stride, camera_type, base_dir=None):
-    intr_override = _load_scene_intrinsics(base_dir) if base_dir is not None else None
-    K_inv, cam_to_imu = _k_inv(camera_type, intr_override)
-    if intr_override is not None:
-        print(f"Using per-scene intrinsics: fx={intr_override['fx']:.2f} fy={intr_override['fy']:.2f} "
-              f"cx={intr_override['cx']:.1f} cy={intr_override['cy']:.1f}")
+def seg_pcd(frame_paths, save_path, mask_generator, voxel_size, voxelizer, th, point_stride, base_dir):
+    K_inv, cam_to_imu = _k_inv(base_dir)
 
     pcd_list = []
     for fp in tqdm(frame_paths, desc="SAM3D: processing frames"):
-        d = get_pcd(fp, mask_generator, point_stride, K_inv, cam_to_imu, camera_type)
+        d = get_pcd(fp, mask_generator, point_stride, K_inv, cam_to_imu)
         if len(d["coord"]) == 0:
             continue
         d = voxelizer(d)
@@ -354,12 +348,11 @@ def main():
     parser = argparse.ArgumentParser(description="SAM3D: segment a scene into 3D object clusters")
     parser.add_argument("--base_dir", required=True)
     parser.add_argument("--save_path", required=True)
-    parser.add_argument("--checkpoint", default=str(Path(__file__).parents[3] / "checkpoints" / "sam2.1_hiera_base_plus.pt"))
+    parser.add_argument("--checkpoint", default=str(Path(__file__).parents[2] / "checkpoints" / "sam2.1_hiera_base_plus.pt"))
     parser.add_argument("--voxel_size", type=float, default=voxel_size)
     parser.add_argument("--th", type=int, default=th)
     parser.add_argument("--frame_stride", type=int, default=frame_stride)
     parser.add_argument("--point_stride", type=int, default=point_stride)
-    parser.add_argument("--camera_type", choices=["realsense", "scannet"], default="scannet")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -383,8 +376,7 @@ def main():
 
     voxelize = Voxelize(voxel_size=args.voxel_size, mode="train", keys=("coord", "color", "group"))
     seg_pcd(frame_paths, args.save_path, mask_gen, args.voxel_size,
-            voxelize, args.th, args.point_stride, args.camera_type,
-            base_dir=args.base_dir)
+            voxelize, args.th, args.point_stride, base_dir=args.base_dir)
 
 
 if __name__ == "__main__":
