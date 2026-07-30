@@ -1,0 +1,56 @@
+### Python ###
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+### Environments ###
+*.env
+.venv/
+venv/
+
+### Model weights ###
+*.pth
+*.pt
+
+### Data & point clouds ###
+*.pcd
+*.npy
+*.npz
+*.ply
+*.sens
+*.avi
+*.mp4
+!plasma_colormap.png
+*.png
+!plasma_colormap.png
+
+### Submodule / large external repos ###
+SegmentAnything3D/*
+recognize-anything/*
+sam2/*
+ram/*
+
+### ScanNet raw data (large, downloaded separately) ###
+ScanNet/scans/*
+ScanNet/RGBD/*
+
+### Vector stores & embeddings ###
+.chroma_db/
+**/vector_store/
+
+### MLflow ###
+src/mlruns/
+
+### Runtime config (generated per-machine) ###
+scenes_config.yaml
+
+### OS / editor ###
+.DS_Store
+.vscode/
+*.ipynb_checkpoints/
+*.log
