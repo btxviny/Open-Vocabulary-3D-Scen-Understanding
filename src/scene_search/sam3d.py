@@ -179,10 +179,7 @@ def get_pcd(frame_path, mask_generator, point_stride, K_inv, cam_to_imu):
     valid = np.isfinite(pts_world).all(axis=1)
     pts_world = pts_world[valid]
 
-    color_f = color_image.reshape(-1, 3)[flat_mask][valid].astype(np.float32)[[slice(None)], :]
-    color_f = np.squeeze(color_f, axis=0) if color_f.ndim == 3 else color_f
-    # BGR → RGB + normalise
-    colors = color_f[:, ::-1] / 255.0
+    colors = color_image.reshape(-1, 3)[flat_mask][valid].astype(np.float32)[:, ::-1] / 255.0
     group_out = group_ids.flatten()[flat_mask][valid]
 
     return dict(coord=pts_world[::point_stride],
