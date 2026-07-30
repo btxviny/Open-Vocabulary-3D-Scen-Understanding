@@ -1,59 +1,54 @@
 # Open 3D Scene Understanding
 
-Open-vocabulary 3D scene understanding and semantic search.  
-Load a ScanNet scene (or any RGB-D sequence), segment objects with SAM2, embed them with CLIP, and query the 3D world in natural language.
+Open-vocabulary 3D scene understanding: load a ScanNet scene, segment objects with SAM2, embed them with CLIP, and query the 3D world by text or image.
 
 ---
 
 ## How it works
 
 ```
-.sens file
+scene.sens
     │
     ▼
-ScanNet/prepare_scene.py   ← extract frames (RGB + depth + pose)
+ScanNet/prepare_scene.py     ← extract RGB + depth + pose per frame, save intrinsics.json
     │
     ▼
 src/pipeline.py
-    ├── scene_search/sam3d.py       — SAM2 masks → 3D object clusters
-    ├── scene_search/clip.py        — CLIP patch embeddings per object
-    ├── scene_search/dense_pointcloud.py  — full-res depth fusion
-    ├── scene_search/interpolate.py — propagate embeddings to dense cloud
-    └── scene_search/vectorstore.py — ChromaDB index
+    ├── sam3d.py             — SAM2 → per-frame masks → 3D object clusters
+    ├── clip.py              — CLIP embedding per object (patch/bin/dilated crop)
+    ├── dense_pointcloud.py  — vectorised depth fusion (full-res point cloud)
+    ├── interpolate.py       — propagate embeddings + cluster IDs to dense cloud
+    └── vectorstore.py       — ChromaDB index
     │
     ▼
-app.py  (Streamlit + Rerun)   ← text / image → highlighted 3D regions
+app.py  (Streamlit + Rerun)  ← text / image query → highlighted 3D regions
 ```
 
 ---
 
 ## Setup
 
-### Requirements
-- CUDA-capable GPU (tested on RTX 5070 Ti, cu128)
-- [uv](https://docs.astral.sh/uv/) package manager
-
-### Install
+**Requirements**: CUDA GPU (tested on RTX 5070 Ti, driver 610, CUDA 13.3), [uv](https://docs.astral.sh/uv/)
 
 ```bash
 ./setup.sh
 ```
 
-This installs Python 3.10, PyTorch with CUDA 12.8, SAM2, CLIP, Open3D, and builds the `pointops` CUDA extension from SegmentAnything3D.
+Installs Python 3.11, PyTorch cu128, SAM2, CLIP, Open3D, ChromaDB, and builds the `pointops` CUDA extension from SegmentAnything3D.  If `nvcc` is not on `PATH`, the script downloads and installs CUDA 12.8 to `~/.local/cuda-12.8` (no sudo needed).
 
 ---
 
 ## ScanNet workflow
 
-### 1. Download a scene
+### 1. Get access & download a scene
 
-> You need a ScanNet licence — fill in the agreement on the ScanNet GitHub page.
+ScanNet requires a licence — fill in the agreement at the ScanNet GitHub page.
 
 ```bash
 python ScanNet/download.py -o ScanNet/scans --id scene0001_00
 ```
 
-### 2. Extract + run full pipeline
+### 2. Extract frames and run the full pipeline
 
 ```bash
 python ScanNet/prepare_scene.py \
@@ -61,15 +56,15 @@ python ScanNet/prepare_scene.py \
     --out_dir ScanNet/RGBD/scene0001_00 \
     --frame_skip 10 \
     --run_pipeline \
-    --scene_name "scene0001_00"
+    --scene_name "Living Room"
 ```
 
 `--frame_skip 10` keeps 1 in 10 frames — good for fast iteration.
 
-### 2a. Extract only, then run pipeline manually
+### 2a. Extract only, then run the pipeline manually
 
 ```bash
-# Extract frames from .sens
+# Extract frames
 python ScanNet/prepare_scene.py \
     --sens ScanNet/scans/scene0001_00/scene0001_00.sens \
     --out_dir ScanNet/RGBD/scene0001_00 \
@@ -77,10 +72,11 @@ python ScanNet/prepare_scene.py \
 
 # Run pipeline
 uv run python -m src.pipeline \
-    --run_path ScanNet/RGBD \
-    --scene_name scene0001_00 \
-    --camera_type scannet
+    --run_path ScanNet/RGBD/scene0001_00 \
+    --scene_name "Living Room"
 ```
+
+Per-scene camera intrinsics are read from the `.sens` file automatically and saved to `intrinsics.json` alongside the extracted frames — no manual configuration needed.
 
 ---
 
@@ -90,8 +86,8 @@ uv run python -m src.pipeline \
 uv run streamlit run app.py
 ```
 
-- **Load scene** — loads CLIP model, ChromaDB index, and point cloud into the Rerun viewer
-- **Search** — text or image query; matching points/clusters highlighted in the Rerun 3D view
+- **Load scene** — loads CLIP model, ChromaDB index, and point cloud into Rerun
+- **Search** — text or image query; matching points or clusters highlighted in 3D
 
 ---
 
@@ -101,13 +97,15 @@ Edit `src/config.yaml`:
 
 | Key | Default | Description |
 |---|---|---|
-| `frame_stride` | 10 | Frame sampling during processing |
-| `point_stride` | 10 | Point sampling per frame |
+| `frame_stride` | 10 | Frame sampling in the CLIP step |
+| `point_stride` | 10 | Point sampling per depth frame |
 | `interpolation_k` | 21 | KNN neighbours for embedding propagation |
-| `sam3d.voxel_size` | 0.01 | Voxel grid size in metres |
-| `sam3d.group_overlap_ratio` | 0.2 | Mask merge threshold |
+| `min_depth` / `max_depth` | 0.5 / 6.0 | Depth filtering range (metres) |
+| `sam3d.voxel_size` | 0.01 | Voxel grid cell size (metres) |
+| `sam3d.group_overlap_ratio` | 0.2 | Mask merge threshold across frames |
 
-Camera intrinsics for `realsense` and `scannet` are also in `src/config.yaml`.
+RealSense camera intrinsics and the cam-to-IMU transform are in `src/config.yaml`.  
+ScanNet intrinsics are read per-scene from the `.sens` file and stored in `intrinsics.json` beside the extracted frames.
 
 ---
 
@@ -115,23 +113,29 @@ Camera intrinsics for `realsense` and `scannet` are also in `src/config.yaml`.
 
 ```
 open-3d-scene-understanding/
-├── app.py                        # Streamlit search UI
+├── app.py                        # Streamlit search UI + Rerun visualisation
 ├── pyproject.toml                # uv dependencies (PyTorch cu128, SAM2, CLIP, …)
-├── setup.sh                      # One-shot install
+├── setup.sh                      # One-shot install (uv + SAM2 checkpoint + pointops)
 ├── ScanNet/
-│   ├── prepare_scene.py          # .sens → frame folders + optional pipeline run
-│   ├── download.py               # ScanNet download script
-│   ├── unpack_images.py          # Batch .sens extraction
-│   └── scannet_sensordata.py     # Python 3 .sens reader
+│   ├── prepare_scene.py          # .sens → frame folders + optional pipeline launch
+│   ├── unpack_images.py          # Batch .sens extraction across multiple scenes
+│   ├── sens_to_pcd.py            # Quick .sens → .npz without per-frame folders
+│   ├── download.py               # Official ScanNet download helper
+│   └── scannet_sensordata.py     # Python 3 .sens reader (from ScanNet repo)
+├── tools/
+│   ├── extract_video.py          # Extract frames from a video file
+│   ├── visualize.py              # Point cloud visualisation helper
+│   └── triangulate.py            # Triangulation utility
 └── src/
-    ├── config.yaml               # Pipeline parameters + camera intrinsics
+    ├── config.yaml               # Pipeline parameters + RealSense camera config
     ├── pipeline.py               # Orchestrates all steps for one scene
     └── scene_search/
-        ├── sam3d.py              # SAM2 + 3D mask merging
-        ├── clip.py               # CLIP embeddings per object mask
+        ├── sam3d.py              # SAM2 masks → 3D object clusters
+        ├── clip.py               # CLIP patch embeddings per object
         ├── dense_pointcloud.py   # Vectorised depth fusion
         ├── interpolate.py        # Embedding + cluster ID propagation
         ├── vectorstore.py        # ChromaDB index creation
         ├── camera_configs.py     # Per-camera intrinsics loader
+        ├── interactive_segmentation.py  # Manual cluster refinement (Open3D)
         └── utils.py              # Shared utilities
 ```

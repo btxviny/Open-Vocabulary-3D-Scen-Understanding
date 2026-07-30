@@ -14,6 +14,8 @@ import yaml
 from pathlib import Path
 from time import time
 
+from .scene_search.dense_pointcloud import detect_camera_type
+
 # scenes_config.yaml lives at repo root (one level above src/)
 _REPO_ROOT = Path(__file__).parent.parent
 _SCENES_CONFIG = _REPO_ROOT / "scenes_config.yaml"
@@ -29,18 +31,6 @@ def run_step(msg: str, cmd: str) -> bool:
     except subprocess.CalledProcessError as e:
         print(f"Failed: {e}")
         return False
-
-
-def detect_camera_type(run_path: str) -> str:
-    dirs = [x for x in Path(run_path).iterdir() if x.is_dir()]
-    if not dirs:
-        return "realsense"
-    first = sorted(dirs)[0]
-    if (first / "extrinsic_matrix.npy").exists():
-        return "realsense"
-    if (first / "pose.npy").exists() or (first / "pose.txt").exists():
-        return "scannet"
-    return "realsense"
 
 
 def load_scenes_config() -> dict:

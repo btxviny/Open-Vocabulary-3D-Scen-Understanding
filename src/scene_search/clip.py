@@ -1,167 +1,193 @@
-import os
-import cv2
+"""
+Compute per-object CLIP embeddings from SAM2 masks and build a sparse point cloud.
+
+For each frame, sam3d.py saves:
+  mask_<id>.png      — binary segmentation mask
+  object_<id>.pcd    — 3D points (world space, colours in 0–1) for that mask
+
+This module reads those files, encodes the masked/cropped image region with CLIP,
+and attaches the embedding to each object's points.  Points from all frames are
+then merged by proximity (radius = merge_radius) and outlier-filtered.
+
+Usage (from repo root):
+    uv run python -m scene_search.clip \
+        --base_dir /path/to/scene_frames \
+        --save_path output/clip_pointcloud.npz \
+        --logic patch
+"""
+
 import glob
+import os
 import re
-import open3d as o3d
+
 import clip
-import torch
-import tqdm
 import numpy as np
-import argparse
+import open3d as o3d
+import torch
 from PIL import Image
 from sklearn.neighbors import KDTree
+from tqdm import tqdm
+
 from . import _config as _cfg_mod
 
 _cfg = _cfg_mod.load()
-frame_stride    = _cfg['frame_stride']
-downsample_rate = _cfg['downsample_rate']
-weights         = _cfg.get('weights', 'ViT-B/32')
-logic           = _cfg['logic']
-BATCH_SIZE = 8
+_frame_stride    = _cfg["frame_stride"]
+_downsample_rate = _cfg["downsample_rate"]
+_weights         = _cfg.get("weights", "ViT-B/32")
+_default_logic   = _cfg["logic"]
 
-# --- Utility Functions --- #
-def dilate_mask(mask: np.ndarray, kernel_size: int = 25, iterations: int = 5) -> np.ndarray:
-    mask = (mask > 0).astype(np.uint8) * 255
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-    dilated = cv2.dilate(mask, kernel, iterations=iterations)
-    return (dilated > 0).astype(np.uint8)
+_BATCH_SIZE = 8
 
-def patch_from_mask(mask: np.ndarray, image: np.ndarray, expand_ratio: float = 0.3) -> np.ndarray:
-    if mask.ndim == 3:
-        mask = mask.squeeze()
-    y_idx, x_idx = np.where(mask > 0)
-    if len(x_idx) == 0 or len(y_idx) == 0:
+
+# ── Image crop helpers ────────────────────────────────────────────────────────
+
+def _patch_from_mask(mask: np.ndarray, image: np.ndarray, expand: float = 0.3) -> np.ndarray:
+    ys, xs = np.where(mask > 0)
+    if len(xs) == 0:
         return np.zeros_like(image)
-    x_min, x_max = x_idx.min(), x_idx.max()
-    y_min, y_max = y_idx.min(), y_idx.max()
     h, w = mask.shape
-    x_pad, y_pad = int((x_max - x_min) * expand_ratio), int((y_max - y_min) * expand_ratio)
-    x_min, x_max = max(x_min - x_pad, 0), min(x_max + x_pad, w - 1)
-    y_min, y_max = max(y_min - y_pad, 0), min(y_max + y_pad, h - 1)
-    return image[y_min:y_max+1, x_min:x_max+1]
+    xpad = int((xs.max() - xs.min()) * expand)
+    ypad = int((ys.max() - ys.min()) * expand)
+    x0 = max(xs.min() - xpad, 0);  x1 = min(xs.max() + xpad, w - 1)
+    y0 = max(ys.min() - ypad, 0);  y1 = min(ys.max() + ypad, h - 1)
+    return image[y0:y1 + 1, x0:x1 + 1]
 
-# --- Pointcloud Preprocessing --- #
-def preprocess_pointcloud(pcd_path, downsample_rate=10):
-    pcd = o3d.io.read_point_cloud(pcd_path)
-    pcd = pcd.uniform_down_sample(every_k_points=downsample_rate)
-    # Convert points and colors to float32 numpy arrays for memory efficiency
-    pcd.points = o3d.utility.Vector3dVector(np.asarray(pcd.points, dtype=np.float32))
-    pcd.colors = o3d.utility.Vector3dVector(np.asarray(pcd.colors, dtype=np.float32))
+
+def _dilate_mask(mask: np.ndarray, ksize: int = 25, iters: int = 5) -> np.ndarray:
+    import cv2
+    u8 = (mask > 0).astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+    return (cv2.dilate(u8, kernel, iterations=iters) > 0).astype(np.uint8)
+
+
+def _masked_crop(mask_np: np.ndarray, image_np: np.ndarray, logic: str) -> np.ndarray:
+    if logic == "bin":
+        return image_np * mask_np[:, :, None]
+    if logic == "patch":
+        return _patch_from_mask(mask_np, image_np)
+    if logic == "dilated":
+        return image_np * _dilate_mask(mask_np)[:, :, None]
+    raise ValueError(f"Unknown logic: {logic!r}")
+
+
+# ── Point cloud helpers ───────────────────────────────────────────────────────
+
+def _load_object_pcd(path: str, downsample: int) -> o3d.geometry.PointCloud:
+    pcd = o3d.io.read_point_cloud(path)
+    if downsample > 1:
+        pcd = pcd.uniform_down_sample(every_k_points=downsample)
     return pcd
 
-# --- Main Function --- #
-def create_clip_pointcloud(base_dir, save_path, merge_radius=0.01, logic="bin"):
+
+def _sort_by_index(paths: list[str]) -> list[str]:
+    return sorted(paths, key=lambda p: int(re.findall(r"\d+", os.path.basename(p))[0]))
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def create_clip_pointcloud(
+    base_dir: str,
+    save_path: str,
+    merge_radius: float = 0.01,
+    logic: str = _default_logic,
+) -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, preprocess = clip.load(weights, device=device)
+    model, preprocess = clip.load(_weights, device=device)
 
-    frames_dir = [os.path.join(base_dir, x) for x in sorted(os.listdir(base_dir)) 
-                  if os.path.isdir(os.path.join(base_dir, x))][::frame_stride]
+    frame_dirs = [
+        os.path.join(base_dir, d)
+        for d in sorted(os.listdir(base_dir))
+        if os.path.isdir(os.path.join(base_dir, d))
+    ][::_frame_stride]
 
-    all_points = []
-    all_embeddings = []
-    all_colors = []
+    all_points:     list[np.ndarray] = []
+    all_colors:     list[np.ndarray] = []
+    all_embeddings: list[np.ndarray] = []
 
-    for frame_dir in tqdm.tqdm(frames_dir, desc="Processing frames"):
-        image_path = os.path.join(frame_dir, 'rgb_image.png')
-        if not os.path.exists(image_path): continue
-        image = Image.open(image_path)
-        image_np = np.array(image).astype(np.uint8)
+    for frame_dir in tqdm(frame_dirs, desc="CLIP: encoding frames"):
+        rgb_path = os.path.join(frame_dir, "rgb_image.png")
+        if not os.path.exists(rgb_path):
+            continue
+        image_np = np.array(Image.open(rgb_path).convert("RGB"), dtype=np.uint8)
 
-        mask_paths = sorted(glob.glob(os.path.join(frame_dir, 'mask_*.png')),
-                            key=lambda x: int(re.findall(r'\d+', os.path.basename(x))[0]))
-        pcd_paths = sorted(glob.glob(os.path.join(frame_dir, 'object_*.pcd')),
-                           key=lambda x: int(re.findall(r'\d+', os.path.basename(x))[0]))
-
-        for idx in range(0, len(mask_paths), BATCH_SIZE):
-            masks = [Image.open(p).convert("L") for p in mask_paths[idx:idx + BATCH_SIZE]]
-            pcds = [preprocess_pointcloud(p, downsample_rate=downsample_rate) for p in pcd_paths[idx:idx + BATCH_SIZE]]
-
-            if logic == "bin":
-                masked_imgs = [image_np * np.array(m)[:, :, None].astype(np.uint8) for m in masks]
-            elif logic == "patch":
-                masked_imgs = [patch_from_mask(np.array(m), image_np) for m in masks]
-            elif logic == "dilated":
-                dilated = [dilate_mask(np.array(m)) for m in masks]
-                masked_imgs = [image_np * d[:, :, None] for d in dilated]
-            else:
-                raise ValueError(f"Unknown logic type: {logic}")
-
-            imgs_tensor = [preprocess(Image.fromarray(m)).unsqueeze(0).to(device) for m in masked_imgs]
-            with torch.no_grad():
-                emb = model.encode_image(torch.cat(imgs_tensor)).cpu()
-            emb = emb / emb.norm(dim=1, keepdim=True)
-            emb_np = emb.numpy().astype(np.float32)
-
-            for pcd, e in zip(pcds, emb_np):
-                n_points = np.array(pcd.points, dtype=np.float32)
-                n_colors = np.array(pcd.colors, dtype=np.float32)
-                n_embeddings = np.repeat(e[None, :], len(n_points), axis=0).astype(np.float32)
-
-                all_points.append(n_points)
-                all_colors.append(n_colors)
-                all_embeddings.append(n_embeddings)
-
-    # Stack everything
-    all_points = np.vstack(all_points).astype(np.float32)
-    all_colors = np.vstack(all_colors).astype(np.float32)
-    all_embeddings = np.vstack(all_embeddings).astype(np.float32)
-
-    # Merge via KDTree
-    tree = KDTree(all_points)
-    visited = np.zeros(len(all_points), dtype=bool)
-    merged_points, merged_colors, merged_embeddings = [], [], []
-
-    indices = np.arange(len(all_points))
-    for batch_start in tqdm.trange(0, len(all_points), 500, desc="Merging points (batched)"):
-        batch_end = min(batch_start + 500, len(all_points))
-        batch_indices = indices[batch_start:batch_end]
-        unvisited_mask = ~visited[batch_indices]
-        batch_indices = batch_indices[unvisited_mask]
-        if len(batch_indices) == 0:
+        mask_paths = _sort_by_index(glob.glob(os.path.join(frame_dir, "mask_*.png")))
+        pcd_paths  = _sort_by_index(glob.glob(os.path.join(frame_dir, "object_*.pcd")))
+        n = min(len(mask_paths), len(pcd_paths))
+        if n == 0:
             continue
 
-        neighbors_list = tree.query_radius(all_points[batch_indices], r=merge_radius)
+        for i in range(0, n, _BATCH_SIZE):
+            batch_masks = [np.array(Image.open(p).convert("L")) for p in mask_paths[i:i + _BATCH_SIZE]]
+            batch_pcds  = [_load_object_pcd(p, _downsample_rate) for p in pcd_paths[i:i + _BATCH_SIZE]]
 
-        for i, neighbors in zip(batch_indices, neighbors_list):
-            if visited[i]:
+            crops   = [_masked_crop(m, image_np, logic) for m in batch_masks]
+            tensors = [preprocess(Image.fromarray(c)).unsqueeze(0).to(device) for c in crops]
+
+            with torch.no_grad():
+                embs = model.encode_image(torch.cat(tensors)).cpu()
+            embs = (embs / embs.norm(dim=1, keepdim=True)).numpy().astype(np.float32)
+
+            for pcd, emb in zip(batch_pcds, embs):
+                pts  = np.asarray(pcd.points, dtype=np.float32)
+                cols = np.asarray(pcd.colors, dtype=np.float32)  # already 0–1
+                if len(pts) == 0:
+                    continue
+                all_points.append(pts)
+                all_colors.append(cols)
+                all_embeddings.append(np.tile(emb, (len(pts), 1)))
+
+    if not all_points:
+        raise ValueError(f"No object PCDs found under {base_dir}")
+
+    pts  = np.vstack(all_points)
+    cols = np.vstack(all_colors)
+    embs = np.vstack(all_embeddings)
+
+    # ── Merge nearby points (average positions, colours, embeddings) ──────────
+    tree = KDTree(pts)
+    visited = np.zeros(len(pts), dtype=bool)
+    merged_pts, merged_cols, merged_embs = [], [], []
+
+    for batch_start in tqdm(range(0, len(pts), 500), desc="CLIP: merging points"):
+        batch_end = min(batch_start + 500, len(pts))
+        candidates = np.where(~visited[batch_start:batch_end])[0] + batch_start
+        if len(candidates) == 0:
+            continue
+        neighbor_sets = tree.query_radius(pts[candidates], r=merge_radius)
+        for idx, neighbors in zip(candidates, neighbor_sets):
+            if visited[idx]:
                 continue
             visited[neighbors] = True
-            merged_points.append(np.mean(all_points[neighbors], axis=0).astype(np.float32))
-            merged_colors.append(np.mean(all_colors[neighbors], axis=0).astype(np.float32))
-            merged_emb = np.mean(all_embeddings[neighbors], axis=0)
-            merged_emb /= np.linalg.norm(merged_emb) + 1e-8
-            merged_embeddings.append(merged_emb.astype(np.float32))
+            merged_pts.append(pts[neighbors].mean(axis=0).astype(np.float32))
+            merged_cols.append(cols[neighbors].mean(axis=0).astype(np.float32))
+            avg_emb = embs[neighbors].mean(axis=0)
+            avg_emb /= np.linalg.norm(avg_emb) + 1e-8
+            merged_embs.append(avg_emb.astype(np.float32))
 
-    # Convert merged lists to arrays
-    merged_points = np.array(merged_points, dtype=np.float32)
-    merged_colors = np.array(merged_colors, dtype=np.float32)
-    merged_embeddings = np.array(merged_embeddings, dtype=np.float32)
+    merged_pts  = np.array(merged_pts,  dtype=np.float32)
+    merged_cols = np.array(merged_cols, dtype=np.float32)
+    merged_embs = np.array(merged_embs, dtype=np.float32)
 
-    # Remove outliers
+    # ── Statistical outlier removal ───────────────────────────────────────────
     pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(merged_points)
-    pcd.colors = o3d.utility.Vector3dVector(merged_colors / 255.0)
+    pcd.points = o3d.utility.Vector3dVector(merged_pts)
+    _, keep = pcd.remove_statistical_outlier(nb_neighbors=100, std_ratio=1.0)
 
-    _, ind_stat = pcd.remove_statistical_outlier(nb_neighbors=100, std_ratio=1.0)
-    merged_points = merged_points[ind_stat]
-    merged_colors = merged_colors[ind_stat]
-    merged_embeddings = merged_embeddings[ind_stat]
+    np.savez(
+        save_path,
+        points=merged_pts[keep],
+        colors=merged_cols[keep],
+        embeddings=merged_embs[keep],
+    )
+    print(f"Saved {save_path} ({len(keep)} points)")
 
-    # Save
-    np.savez(save_path,
-             points=merged_points,
-             colors=merged_colors,
-             embeddings=merged_embeddings)
 
-    print(f"Saved {save_path} with {len(merged_points)} merged points.")
-
-# --- Entry Point --- #
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate a CLIP-colored 3D point cloud with one-time merge.")
-    parser.add_argument('--base_dir', type=str, required=True)
-    parser.add_argument('--save_path', type=str, required=True)
-    parser.add_argument('--merge_radius', type=float, default=0.01)
-    parser.add_argument('--logic', type=str, choices=["bin", "patch", "dilated"], default=logic)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base_dir",     required=True)
+    parser.add_argument("--save_path",    required=True)
+    parser.add_argument("--merge_radius", type=float, default=0.01)
+    parser.add_argument("--logic",        choices=["bin", "patch", "dilated"], default=_default_logic)
     args = parser.parse_args()
-
     create_clip_pointcloud(args.base_dir, args.save_path, args.merge_radius, args.logic)

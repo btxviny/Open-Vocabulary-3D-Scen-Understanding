@@ -41,12 +41,6 @@ def load_scenes() -> dict:
         return (yaml.safe_load(f) or {}).get("scenes", {})
 
 
-def cosine_to_color(score, min_s=0.0, max_s=1.0, cmap="inferno", n=1000):
-    ns = ((score - min_s) / (max_s - min_s + 1e-8)) ** 2
-    ns = np.round(np.clip(ns, 0, 1) * (n - 1)) / (n - 1)
-    return list(plt.get_cmap(cmap)(ns)[:3])
-
-
 def query_collection(model, collection, text=None, image: Image.Image = None, top_k=1000):
     if text is not None:
         tokens = clip.tokenize([text]).to(DEVICE)
