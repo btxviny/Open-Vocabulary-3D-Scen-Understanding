@@ -1,8 +1,6 @@
 # Open 3D Scene Understanding
 
-![alt-txt](./normal.png)
-![alt-txt](./query.png)
-
+![alt-txt](./ui.png)
 
 Open-vocabulary semantic search over 3D scenes: segment each frame with SAM2,
 embed every mask with CLIP, back-project to world space, then query the
@@ -20,14 +18,14 @@ ScanNet/prepare_scene.py   ← unpack RGB + depth + pose per frame; save intrins
     │
     ▼
 src/pipeline.py
-    ├── Step 0  sam2_segment       SAM2 masks per frame → mask_*.png + object_*.pcd
-    ├── Step 1  clip_embed         CLIP encode each mask crop; recursive disk-spill merge
-    │                              → embedded_pointcloud.npz  (sparse, CLIP-embedded)
-    ├── Step 2  dense_pointcloud   Full RGBD unproject of all frames
-    │                              → dense_pointcloud.npz  (dense geometry + colours)
-    ├── Step 3  interpolate        Gaussian-weighted KNN: spread CLIP embeddings
-    │                              from sparse onto dense cloud (in-place update)
-    └── Step 4  vectorstore        ChromaDB cosine index from dense_pointcloud.npz
+    ├── Step 0  segment             SAM2 masks per frame → mask_*.png + object_*.pcd
+    ├── Step 1  embed               CLIP encode each mask crop; recursive disk-spill merge
+    │                                   → embedded_pointcloud.npz  (sparse, CLIP-embedded)
+    ├── Step 2  fuse                Full RGBD unproject of all frames
+    │                                   → dense_pointcloud.npz  (dense geometry + colours)
+    ├── Step 3  interpolate         Gaussian-weighted KNN: spread CLIP embeddings
+    │                                   from sparse onto dense cloud (in-place update)
+    └── Step 4  vectorstore         ChromaDB cosine index from dense_pointcloud.npz
     │
     ▼
 app.py  (Streamlit + Rerun)   text / image query → highlighted 3D regions
