@@ -1,5 +1,5 @@
 """
-End-to-end ScanNet scene preparation for the the pipeline pipeline.
+End-to-end ScanNet scene preparation for the pipeline.
 
 Extracts a ScanNet .sens file into per-frame folders that the pipeline expects,
 then optionally runs the full pipeline.
@@ -96,17 +96,16 @@ def extract_scene(sens_path: str, out_dir: str, frame_skip: int = 1) -> int:
 
 
 def run_pipeline(out_dir: str, scene_name: str, force: bool = False) -> None:
-    """Run the the pipeline pipeline on an already-extracted scene directory."""
-    src_dir = Path(__file__).parent.parent / "src"
+    """Run the pipeline on an already-extracted scene directory."""
+    repo_root = Path(__file__).parent.parent
     cmd = (
-        f"cd {src_dir} && python pipeline.py "
-        f"--run_path {Path(out_dir).parent} "
-        f"--scene_name \"{scene_name}\" "
-        f"--camera_type scannet"
+        f'python -m src.pipeline'
+        f' --run_path "{out_dir}"'
+        f' --scene_name "{scene_name}"'
         + (" --force" if force else "")
     )
     print(f"\nRunning pipeline:\n  {cmd}\n")
-    subprocess.run(cmd, shell=True, check=True)
+    subprocess.run(cmd, shell=True, check=True, cwd=repo_root)
 
 
 def main():
@@ -117,7 +116,7 @@ def main():
     parser.add_argument("--frame_skip", type=int, default=1,
                         help="Export every Nth frame (default: 1)")
     parser.add_argument("--run_pipeline", action="store_true",
-                        help="Run the the pipeline pipeline after extraction")
+                        help="Run the pipeline after extraction")
     parser.add_argument("--scene_name", type=str, default="",
                         help="Scene name for the pipeline (required if --run_pipeline)")
     parser.add_argument("--force", action="store_true",

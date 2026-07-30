@@ -2,25 +2,17 @@ frame_stride: 10
 point_stride: 10
 min_depth: 0.5
 max_depth: 6.0
-downsample_rate: 3
 weights: ViT-B/32
-logic: patch
 interpolation_k: 21
+downsample_rate: 3
+logic: patch
 
-sam3d:
-  voxel_size: 0.01
+sam2:
+  merge_radius: 0.01
   points_per_side: 32
-  pred_iou_thresh: 0.8
-  stability_score_thresh: 0.8
+  pred_iou_thresh: 0.80
+  stability_score_thresh: 0.80
   min_mask_region_area: 200
-  th: 1000
-  group_overlap_ratio: 0.2
-  voxel_search_multiplier: 1.5
-
-clip:
-  threshold: 0.01
-
-interpolation: {}
 
 # Fallback intrinsics used when a scene has no intrinsics.json.
 # ScanNet scenes always have intrinsics.json (written by prepare_scene.py).
@@ -29,16 +21,3 @@ default_intrinsics:
   fy: 577.870605
   cx: 319.5
   cy: 239.5
-
-# RealSense camera config (kept for reference; not used by the main pipeline)
-realsense:
-  intrinsics:
-    fx: 386.99176025390625
-    fy: 386.99176025390625
-    cx: 320.9659118652344
-    cy: 241.470703125
-  cam_to_imu:
-  - [0.894078, 0.012117,  0.447747, 0.008695]
-  - [-0.446418, -0.05745, 0.892979, 0.127623]
-  - [0.036543, -0.998275, -0.045955, 0.761847]
-  - [0.0, 0.0, 0.0, 1.0]
