@@ -31,7 +31,7 @@ checkpoints/
 !plasma_colormap.png
 
 ### Submodule / large external repos ###
-SegmentAnything3D/*
+SegmentAnything3D/
 recognize-anything/*
 sam2/*
 ram/*
@@ -49,6 +49,9 @@ src/mlruns/
 
 ### Runtime config (generated per-machine) ###
 scenes_config.yaml
+
+### Local CUDA toolkit (installed by setup.sh without sudo) ###
+.cuda_home/
 
 ### OS / editor ###
 .DS_Store

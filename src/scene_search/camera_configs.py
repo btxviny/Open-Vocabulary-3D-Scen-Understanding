@@ -1,29 +1,13 @@
-"""
-Camera configuration file for different sensor setups.
-This file reads camera configurations from config.yaml.
-"""
+"""Camera configuration loader — reads from the centralised config.yaml."""
 
 import numpy as np
-import yaml
-from pathlib import Path
+from . import _config as _cfg_mod
 
-def load_camera_configs():
-    """Load camera configurations from config.yaml."""
-    config_path = Path('config.yaml')
-    if not config_path.exists():
-        # Try to find config.yaml in parent directories
-        config_path = Path(__file__).parent.parent / 'config.yaml'
-    
-    if not config_path.exists():
-        raise FileNotFoundError(f"config.yaml not found. Looked in: {config_path}")
-    
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    if 'cameras' not in config:
-        raise ValueError("No 'cameras' section found in config.yaml")
-    
-    return config['cameras']
+def load_camera_configs() -> dict:
+    cfg = _cfg_mod.load()
+    if 'cameras' not in cfg:
+        raise ValueError("No 'cameras' section in config.yaml")
+    return cfg['cameras']
 
 
 def get_camera_config(camera_type):

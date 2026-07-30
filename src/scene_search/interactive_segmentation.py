@@ -45,7 +45,7 @@ def propagate_labels(full_points, down_points, down_labels, k=100, batch_size=50
 
     # Iterative smoothing
     for iter in range(1, num_iterations):
-        print(f"🔁 Label propagation iteration {iter+1}")
+        print(f"Label propagation iteration {iter+1}")
         nn = NearestNeighbors(n_neighbors=k).fit(full_points)
         new_labels = np.zeros(N, dtype=int)
 
@@ -79,7 +79,7 @@ def main(input_file, output_file, every_k=10, alpha=0.5, beta=0.5):
     # Downsample
     ds_points, ds_colors, ds_embeddings, ds_idxs = uniform_downsample(points, colors, embeddings, every_k)
     print(f"Downsampled colors range: min={ds_colors.min():.3f}, max={ds_colors.max():.3f}")
-    print(f"🔻 Downsampled from {len(points)} to {len(ds_points)}")
+    print(f" Downsampled from {len(points)} to {len(ds_points)}")
 
     # Create Open3D point cloud for visualization of full resolution cloud
     full_pcd = o3d.geometry.PointCloud()
@@ -128,11 +128,11 @@ def main(input_file, output_file, every_k=10, alpha=0.5, beta=0.5):
         # Clustering
         kmeans = KMeans(n_clusters=len(picked_idxs), init=init_centers, n_init=1, max_iter=100)
         ds_labels = kmeans.fit_predict(fused_ds)
-        print(f"🔎 Clustered downsampled cloud into {np.unique(ds_labels).size} clusters")
+        print(f" Clustered downsampled cloud into {np.unique(ds_labels).size} clusters")
 
         # Propagate
         full_labels = propagate_labels(points, ds_points, ds_labels, k=5)
-        print("✅ Labels propagated to full cloud")
+        print(" Labels propagated to full cloud")
 
         # Visualize results
         cluster_colors = np.random.rand(np.max(full_labels)+1, 3)
@@ -175,7 +175,7 @@ def main(input_file, output_file, every_k=10, alpha=0.5, beta=0.5):
                 embeddings=embeddings, 
                 cluster_labels=full_labels
             )
-            print(f"📦 Saved clustered result to {output_file}")
+            print(f" Saved clustered result to {output_file}")
             break
         elif choice == 'N':
             print("Exiting without saving.")
